@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Gravity Slingshot</title>
+<style>
+  :root { --bg:#05070f; --card:#ffffff; --fg:#12151f; --muted:#5b6275; --acc:#3b6cff;
+          box-sizing:border-box; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px); }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --card:#141927; --fg:#e8ebf5; --muted:#8f97b0; --acc:#7a9bff; } }
+  :root[data-theme="dark"] { --card:#141927; --fg:#e8ebf5; --muted:#8f97b0; --acc:#7a9bff; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; margin:0; background:var(--bg); overflow:hidden; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  canvas { display:block; width:100%; height:100%; touch-action:none; }
+  #retry { position:fixed; right:12px; bottom:calc(12px + env(safe-area-inset-bottom,0px)); padding:9px 14px; border-radius:10px;
+           border:1px solid rgba(255,255,255,.25); background:rgba(20,25,39,.7); color:#e8ebf5; font-size:14px; }
+  #ov { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(5,7,15,.6); padding:20px; }
+  #ov.on { display:flex; }
+  #card { background:var(--card); color:var(--fg); border-radius:16px; padding:22px; max-width:340px; width:100%; text-align:center; }
+  #card h2 { margin:0 0 6px; font-size:22px; }
+  #stars { font-size:30px; letter-spacing:4px; color:#ffc542; margin:4px 0 10px; }
+  #fact { font-size:14px; line-height:1.45; color:var(--muted); margin:0 0 16px; }
+  .btns { display:flex; gap:10px; }
+  .btns button { flex:1; padding:11px; font-size:15px; border-radius:10px; border:1px solid var(--muted); background:transparent; color:var(--fg); }
+  .btns button.p { background:var(--acc); border-color:var(--acc); color:#fff; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="retry">↺ Retry</button>
+<div id="ov"><div id="card">
+  <h2 id="ttl"></h2><div id="stars"></div><p id="fact"></p>
+  <div class="btns"><button id="again">Replay</button><button id="next" class="p">Next level</button></div>
+</div></div>
+<script>
+const NAME = "Arunava", COLLEGE = "IIT BHU";
+const $ = id => document.getElementById(id);
+const cv = $('c'), ctx = cv.getContext('2d');
+const K = 95, STEP = 1 / 90, MAXPULL = 22, POWER = 2.3;
+const COLS = ['#ff9a5a', '#6bb7ff', '#c28bff', '#7be0a8', '#ffd166'];
+
+// x,y are fractions of width / height; orbit: c = centre fraction, R in world units, w = rad/s
+const LEVELS = [
+  { t: [.8, .14, 7], s: [.2, .88], p: [{ x: .62, y: .55, r: 9 }],
+    f: 'Every mass attracts every other: F = G·m₁·m₂ / r². The pull falls off with the square of distance.' },
+  { t: [.5, .1, 7], s: [.5, .9], p: [{ x: .5, y: .5, r: 12 }],
+    f: 'Escape velocity from Earth is about 11.2 km/s, and it does not depend on the mass of the rocket.' },
+  { t: [.85, .1, 6], s: [.15, .9], p: [{ x: .35, y: .6, r: 8 }, { x: .68, y: .33, r: 10 }],
+    f: 'Voyager 2 used gravity assists at Jupiter, Saturn, Uranus and Neptune to reach the outer solar system.' },
+  { t: [.5, .08, 6], s: [.5, .92], p: [{ x: .5, y: .5, r: 7 }, { r: 6, o: { c: [.5, .5], R: 28, w: .8, ph: 0 } }],
+    f: 'Kepler’s laws: orbits are ellipses, and a body moves faster when it is closer to what it orbits.' },
+  { t: [.8, .1, 6], s: [.2, .9], p: [{ r: 7, o: { c: [.5, .5], R: 14, w: 1.1, ph: 0 } }, { r: 7, o: { c: [.5, .5], R: 14, w: 1.1, ph: Math.PI } }],
+    f: 'Binary stars orbit their shared centre of mass, called the barycentre.' },
+  { t: [.88, .08, 5], s: [.12, .92], p: [{ x: .3, y: .65, r: 9 }, { x: .72, y: .52, r: 10 }, { x: .25, y: .25, r: 6 },
+    { r: 5, o: { c: [.52, .27], R: 15, w: 1.3, ph: 1 } }],
+    f: 'The three-body problem has no general closed-form solution. Small changes in start give wildly different paths.' }
+];
+
+let W, H, sc, Hw, lv = 0, state = 'aim', attempts = 0, gt = 0, acc = 0, stateT = 0, msg = '';
+let planets = [], start, target, probe, trail = [], parts = [], drag = null, best = [], bgStars = [];
+try { best = JSON.parse(localStorage.getItem('gs_best') || '[]'); } catch (e) { best = []; }
+
+function build() {
+  sc = W / 100; Hw = H / sc; const L = LEVELS[lv];
+  start = [L.s[0] * 100, L.s[1] * Hw]; target = { x: L.t[0] * 100, y: L.t[1] * Hw, r: L.t[2] };
+  planets = L.p.map((p, i) => ({ r: p.r, m: p.r * p.r, col: COLS[(i + lv) % COLS.length], x: (p.x || 0) * 100, y: (p.y || 0) * Hw,
+    o: p.o && { cx: p.o.c[0] * 100, cy: p.o.c[1] * Hw, R: p.o.R, w: p.o.w, ph: p.o.ph } }));
+  reset();
+}
+function reset() { state = 'aim'; probe = null; trail = []; parts = []; drag = null; $('ov').classList.remove('on'); }
+function pos(p, t) { if (!p.o) return [p.x, p.y]; const a = p.o.ph + p.o.w * t; return [p.o.cx + p.o.R * Math.cos(a), p.o.cy + p.o.R * Math.sin(a)]; }
+function accel(x, y, t) {
+  let ax = 0, ay = 0;
+  for (const p of planets) { const [px, py] = pos(p, t), dx = px - x, dy = py - y, d2 = dx * dx + dy * dy + 4, f = K * p.m / (d2 * Math.sqrt(d2)); ax += dx * f; ay += dy * f; }
+  return [ax, ay];
+}
+function pull() {
+  if (!drag) return null;
+  let dx = (drag.x0 - drag.x1) / sc, dy = (drag.y0 - drag.y1) / sc; const l = Math.hypot(dx, dy);
+  if (l < 1.5) return null; const k = Math.min(l, MAXPULL) / l; return [dx * k, dy * k];
+}
+function launch(v) { attempts++; state = 'fly'; probe = { x: start[0], y: start[1], vx: v[0] * POWER, vy: v[1] * POWER, t: 0 }; trail = []; }
+function boom(x, y, n, col) { for (let i = 0; i < n; i++) { const a = Math.random() * 6.3, v = 8 + Math.random() * 30; parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, l: 1, col }); } }
+function fail(m) { state = 'crash'; msg = m; stateT = 1; boom(probe.x, probe.y, 40, '#ffb36b'); }
+function win() {
+  state = 'win'; boom(target.x, target.y, 60, '#7dffb0');
+  const st = attempts <= 2 ? 3 : attempts <= 5 ? 2 : 1; best[lv] = Math.max(best[lv] || 0, st);
+  try { localStorage.setItem('gs_best', JSON.stringify(best)); } catch (e) {}
+  setTimeout(() => {
+    $('ttl').textContent = lv === LEVELS.length - 1 ? 'All levels cleared!' : 'Level ' + (lv + 1) + ' complete';
+    $('stars').textContent = '★'.repeat(st) + '☆'.repeat(3 - st);
+    $('fact').textContent = LEVELS[lv].f; $('next').textContent = lv === LEVELS.length - 1 ? 'Start over' : 'Next level';
+    $('ov').classList.add('on');
+  }, 900);
+}
+function step() {
+  gt += STEP; if (state !== 'fly') return;
+  const [ax, ay] = accel(probe.x, probe.y, gt);
+  probe.vx += ax * STEP; probe.vy += ay * STEP; probe.x += probe.vx * STEP; probe.y += probe.vy * STEP; probe.t += STEP;
+  if (Math.round(probe.t / STEP) % 3 === 0) { trail.push([probe.x, probe.y]); if (trail.length > 400) trail.shift(); }
+  for (const p of planets) { const [px, py] = pos(p, gt); if (Math.hypot(px - probe.x, py - probe.y) < p.r) return fail('Crashed!'); }
+  if (Math.hypot(target.x - probe.x, target.y - probe.y) < target.r) return win();
+  if (probe.x < -25 || probe.x > 125 || probe.y < -25 || probe.y > Hw + 25) return fail('Lost in space');
+  if (probe.t > 28) fail('Drifted too long');
+}
+
+// ---------- input
+cv.addEventListener('pointerdown', e => { if (state !== 'aim') return; cv.setPointerCapture(e.pointerId); drag = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY }; });
+cv.addEventListener('pointermove', e => { if (drag) { drag.x1 = e.clientX; drag.y1 = e.clientY; } });
+cv.addEventListener('pointerup', () => { const v = pull(); drag = null; if (v && state === 'aim') launch(v); });
+$('retry').onclick = () => reset();
+$('again').onclick = () => { attempts = 0; reset(); };
+$('next').onclick = () => { lv = (lv + 1) % LEVELS.length; attempts = 0; build(); };
+
+// ---------- drawing
+function glow(x, y, r, col, a) { const g = ctx.createRadialGradient(x, y, 0, x, y, r); g.addColorStop(0, col); g.addColorStop(1, 'rgba(0,0,0,0)'); ctx.globalAlpha = a; ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); ctx.globalAlpha = 1; }
+function draw(t) {
+  ctx.fillStyle = '#05070f'; ctx.fillRect(0, 0, W, H);
+  for (const s of bgStars) { ctx.globalAlpha = .3 + .3 * Math.sin(t / 700 + s[2]); ctx.fillStyle = '#cfe0ff'; ctx.fillRect(s[0] * W, s[1] * H, s[3], s[3]); }
+  ctx.globalAlpha = 1;
+  for (const p of planets) {                       // planets + field rings
+    const [px, py] = pos(p, gt), x = px * sc, y = py * sc, r = p.r * sc;
+    ctx.strokeStyle = 'rgba(160,190,255,.10)'; ctx.lineWidth = 1;
+    for (const k of [1.8, 2.8]) { ctx.beginPath(); ctx.arc(x, y, r * k, 0, 7); ctx.stroke(); }
+    glow(x, y, r * 1.9, p.col, .25);
+    const g = ctx.createRadialGradient(x - r * .35, y - r * .35, r * .1, x, y, r); g.addColorStop(0, '#fff'); g.addColorStop(.25, p.col); g.addColorStop(1, '#111');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+  }
+  const tx = target.x * sc, ty = target.y * sc, pu = 1 + .08 * Math.sin(t / 250);   // target
+  glow(tx, ty, target.r * sc * 2, '#5dffa3', .35);
+  ctx.strokeStyle = '#5dffa3'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.arc(tx, ty, target.r * sc * pu, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = '#5dffa3'; ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.fillText('TARGET', tx, ty + 4);
+  const sx = start[0] * sc, sy = start[1] * sc;                                       // start
+  ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(sx, sy, 9, 0, 7); ctx.stroke();
+  const v = state === 'aim' ? pull() : null;
+  if (v) {                                                                             // aim + preview
+    let x = start[0], y = start[1], vx = v[0] * POWER, vy = v[1] * POWER;
+    for (let i = 0; i < 160; i++) {
+      const [ax, ay] = accel(x, y, gt + i * STEP); vx += ax * STEP; vy += ay * STEP; x += vx * STEP; y += vy * STEP;
+      let hit = false; for (const p of planets) { const [px, py] = pos(p, gt + i * STEP); if (Math.hypot(px - x, py - y) < p.r) hit = true; }
+      if (hit) break;
+      if (i % 5 === 0) { ctx.fillStyle = `rgba(255,255,255,${.8 - i / 220})`; ctx.beginPath(); ctx.arc(x * sc, y * sc, 2.2, 0, 7); ctx.fill(); }
+    }
+    const pw = Math.hypot(v[0], v[1]) / MAXPULL;
+    ctx.strokeStyle = `hsl(${120 - 120 * pw},90%,60%)`; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + v[0] * sc * 1.3, sy + v[1] * sc * 1.3); ctx.stroke();
+  }
+  if (trail.length) { ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 2; ctx.beginPath(); trail.forEach((p, i) => i ? ctx.lineTo(p[0] * sc, p[1] * sc) : ctx.moveTo(p[0] * sc, p[1] * sc)); ctx.stroke(); }
+  if (state === 'fly') { glow(probe.x * sc, probe.y * sc, 14, '#fff', .8); ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(probe.x * sc, probe.y * sc, 4, 0, 7); ctx.fill(); }
+  for (const p of parts) { ctx.globalAlpha = Math.max(0, p.l); ctx.fillStyle = p.col; ctx.fillRect(p.x * sc, p.y * sc, 3, 3); } ctx.globalAlpha = 1;
+  ctx.textAlign = 'left'; ctx.fillStyle = '#e8ebf5'; ctx.font = 'bold 15px system-ui';   // HUD
+  ctx.fillText('Level ' + (lv + 1) + ' / ' + LEVELS.length, 14, 26);
+  ctx.font = '13px system-ui'; ctx.fillStyle = '#8f97b0'; ctx.fillText('Launches: ' + attempts, 14, 46);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#ffc542'; ctx.font = 'bold 15px system-ui'; ctx.fillText('★ ' + best.reduce((a, b) => a + (b || 0), 0), W - 14, 26);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#6a7391'; ctx.font = '12px system-ui'; ctx.fillText('by ' + NAME + ' · ' + COLLEGE, 14, H - 18);
+  if (state === 'aim' && !drag && attempts === 0) { ctx.textAlign = 'center'; ctx.fillStyle = '#cfd6ee'; ctx.font = '15px system-ui';
+    ctx.fillText('Drag back, then release to launch', W / 2, H * .5 - 8); ctx.fillStyle = '#8f97b0'; ctx.font = '13px system-ui';
+    ctx.fillText('Use gravity to bend your path to the target', W / 2, H * .5 + 14); }
+  if (state === 'crash') { ctx.textAlign = 'center'; ctx.fillStyle = '#ff8b8b'; ctx.font = 'bold 22px system-ui'; ctx.fillText(msg, W / 2, H * .5); }
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now; acc += dt;
+  while (acc >= STEP) { step(); acc -= STEP; }
+  for (const p of parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.l -= dt * 1.1; } parts = parts.filter(p => p.l > 0);
+  if (state === 'crash') { stateT -= dt; if (stateT <= 0) reset(); }
+  draw(now); requestAnimationFrame(loop);
+}
+function size() {
+  const d = Math.min(2, devicePixelRatio || 1); W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = W * d; cv.height = H * d; ctx.setTransform(d, 0, 0, d, 0, 0); build();
+}
+bgStars = Array.from({ length: 90 }, () => [Math.random(), Math.random(), Math.random() * 6, Math.random() < .2 ? 2 : 1]);
+addEventListener('resize', size); size(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
